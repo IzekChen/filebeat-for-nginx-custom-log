@@ -1,0 +1,330 @@
+#PUT _ingest/pipeline/filebeat-pipeline-custom
+
+{
+  "filebeat-pipeline-custom" : {
+    "description" : "Pipeline for parsing Nginx access logs. Requires the geoip and user_agent plugins.",
+    "processors" : [
+      {
+        "grok" : {
+          "field" : "message",
+          "patterns" : [
+            """(%{NGINX_HOST} )?"?(?:%{NGINX_ADDRESS_LIST:nginx.access.remote_ip_list}|%{NOTSPACE:source.address}) (-|%{WORD:http.request.x_environment_id}) - %{DATA:user.name} \[%{HTTPDATE:nginx.access.time}\] "%{DATA:nginx.access.info}" %{NUMBER:http.response.status_code:long} %{NUMBER:http.response.body.bytes:long} "%{DATA:http.request.referrer}" "%{DATA:user_agent.original}" (-|%{NUMBER:http.response.time:float})""",
+            """(%{NGINX_HOST} )?"?(?:%{NGINX_ADDRESS_LIST:nginx.access.remote_ip_list}|%{NOTSPACE:source.address}) - %{DATA:user.name} \[%{HTTPDATE:nginx.access.time}\] "%{DATA:nginx.access.info}" %{NUMBER:http.response.status_code:long} %{NUMBER:http.response.body.bytes:long} "%{DATA:http.request.referrer}" "%{DATA:user_agent.original}" (-|%{NUMBER:http.response.time:float})""",
+            """(%{NGINX_HOST} )?"?(?:%{NOTSPACE:source.address}|%{NGINX_ADDRESS_LIST:nginx.access.remote_ip_list}) - %{DATA:user.name} \[%{HTTPDATE:nginx.access.time}\] "%{DATA:nginx.access.info}" %{NUMBER:http.response.status_code:long} %{NUMBER:http.response.body.bytes:long} "%{DATA:http.request.referrer}" "%{DATA:user_agent.original}" %{QS:nginx.access.remote_ip_list}""",
+            """(%{NGINX_HOST} )?"?(?:%{NGINX_ADDRESS_LIST:nginx.access.remote_ip_list}|%{NOTSPACE:source.address}) - %{DATA:user.name} \[%{HTTPDATE:nginx.access.time}\] "%{DATA:nginx.access.info}" %{NUMBER:http.response.status_code:long} %{NUMBER:http.response.body.bytes:long} "%{DATA:http.request.referrer}" "%{DATA:user_agent.original}" """
+          ],
+          "pattern_definitions" : {
+            "NGINX_HOST" : "(?:%{IP:destination.ip}|%{NGINX_NOTSEPARATOR:destination.domain})(:%{NUMBER:destination.port})?",
+            "NGINX_NOTSEPARATOR" : "[^\t ,:]+",
+            "NGINX_ADDRESS_LIST" : """(?:%{IP}|%{WORD})("?,?\s*(?:%{IP}|%{WORD}))*"""
+          },
+          "ignore_missing" : true
+        }
+      },
+      {
+        "grok" : {
+          "patterns" : [
+            "%{WORD:http.request.method} %{DATA:url.original} HTTP/%{NUMBER:http.version}",
+            ""
+          ],
+          "ignore_missing" : true,
+          "field" : "nginx.access.info"
+        }
+      },
+      {
+        "remove" : {
+          "field" : "nginx.access.info"
+        }
+      },
+      {
+        "split" : {
+          "field" : "nginx.access.remote_ip_list",
+          "separator" : """"?,?\s+""",
+          "ignore_missing" : true
+        }
+      },
+      {
+        "split" : {
+          "field" : "nginx.access.origin",
+          "separator" : """"?,?\s+""",
+          "ignore_missing" : true
+        }
+      },
+      {
+        "set" : {
+          "value" : "",
+          "field" : "source.address",
+          "if" : "ctx.source?.address == null"
+        }
+      },
+      {
+        "script" : {
+          "source" : "boolean isPrivate(def dot, def ip) { try { StringTokenizer tok = new StringTokenizer(ip, dot); int firstByte = Integer.parseInt(tok.nextToken());       int secondByte = Integer.parseInt(tok.nextToken());       if (firstByte == 10) {         return true;       }       if (firstByte == 192 && secondByte == 168) {         return true;       }       if (firstByte == 172 && secondByte >= 16 && secondByte <= 31) {         return true;       }       if (firstByte == 127) {         return true;       }       return false;     } catch (Exception e) {       return false;     }   }   try {    ctx.source.address = null;    if (ctx.nginx.access.remote_ip_list == null) { return; }    def found = false;    for (def item : ctx.nginx.access.remote_ip_list) {        if (!isPrivate(params.dot, item)) {            ctx.source.address = item;            found = true;            break;        }    }    if (!found) {     ctx.source.address = ctx.nginx.access.remote_ip_list[0];   }} catch (Exception e) { ctx.source.address = null; }",
+          "params" : {
+            "dot" : "."
+          },
+          "if" : "ctx.nginx?.access?.remote_ip_list != null && ctx.nginx.access.remote_ip_list.length > 0",
+          "lang" : "painless"
+        }
+      },
+      {
+        "remove" : {
+          "field" : "source.address",
+          "if" : "ctx.source.address == null"
+        }
+      },
+      {
+        "grok" : {
+          "field" : "source.address",
+          "patterns" : [
+            "^%{IP:source.ip}$"
+          ],
+          "ignore_failure" : true
+        }
+      },
+      {
+        "grok" : {
+          "field" : "http.request.referrer",
+          "patterns" : [
+            "%{URIPROTO:http.request.referer_proto}://(?:%{USER}(?::[^@]*)?@)?(?:%{URIHOST:http.request.referer_domain})?(?:%{URIPATHPARAM})?"
+          ],
+          "pattern_definitions" : {
+            "URIPATHPARAM" : "%{URIPATH:http.request.referer_path}(?:%{URIPARAM:http.request.referer_param})?"
+          },
+          "ignore_failure" : true
+        }
+      },
+      {
+        "gsub" : {
+          "field" : "http.request.referer_param",
+          "pattern" : "\\?",
+          "replacement" : "",
+          "ignore_failure" : true
+        }
+      },
+      {
+        "urldecode" : {
+          "field" : "http.request.referer_param",
+          "ignore_failure" : true
+        }
+      },
+      {
+        "kv" : {
+          "field" : "http.request.referer_param",
+          "field_split" : "&",
+          "value_split" : "=",
+          "target_field" : "http.request.referer_param_details",
+          "ignore_failure" : true,
+          "ignore_missing" : true,
+          "strip_brackets" : true
+        }
+      },
+      {
+        "grok" : {
+          "field" : "url.original",
+          "patterns" : [
+            "%{URIPATH:url.path}%{URIPARAM:url.params}",
+            "%{URIPATH:url.path}"
+          ],
+          "ignore_failure" : true
+        }
+      },
+      {
+        "rename" : {
+          "field" : "@timestamp",
+          "target_field" : "event.created"
+        }
+      },
+      {
+        "date" : {
+          "field" : "nginx.access.time",
+          "target_field" : "@timestamp",
+          "formats" : [
+            "dd/MMM/yyyy:H:m:s Z"
+          ],
+          "on_failure" : [
+            {
+              "append" : {
+                "field" : "error.message",
+                "value" : "{{ _ingest.on_failure_message }}"
+              }
+            }
+          ]
+        }
+      },
+      {
+        "remove" : {
+          "field" : "nginx.access.time"
+        }
+      },
+      {
+        "user_agent" : {
+          "field" : "user_agent.original"
+        }
+      },
+      {
+        "geoip" : {
+          "if" : "ctx.source.ip != null",
+          "field" : "source.ip",
+          "target_field" : "source.geo"
+        }
+      },
+      {
+        "geoip" : {
+          "target_field" : "source.as",
+          "properties" : [
+            "asn",
+            "organization_name"
+          ],
+          "ignore_missing" : true,
+          "database_file" : "GeoLite2-ASN.mmdb",
+          "field" : "source.ip"
+        }
+      },
+      {
+        "rename" : {
+          "field" : "source.as.asn",
+          "target_field" : "source.as.number",
+          "ignore_missing" : true
+        }
+      },
+      {
+        "rename" : {
+          "ignore_missing" : true,
+          "field" : "source.as.organization_name",
+          "target_field" : "source.as.organization.name"
+        }
+      },
+      {
+        "set" : {
+          "if" : "ctx.source.geo.location.lat != null && ctx.source.geo.location.lon != null",
+          "field" : "geo_hash_location.lat",
+          "value" : "{{source.geo.location.lat}}",
+          "ignore_failure" : true,
+          "on_failure" : [
+            {
+              "set" : {
+                "field" : "geo_hash_location.lat",
+                "value" : 37
+              }
+            }
+          ]
+        }
+      },
+      {
+        "set" : {
+          "if" : "ctx.source.geo.location.lat != null && ctx.source.geo.location.lon != null",
+          "field" : "geo_hash_location.lon",
+          "value" : "{{source.geo.location.lon}}",
+          "ignore_failure" : true,
+          "on_failure" : [
+            {
+              "set" : {
+                "field" : "geo_hash_location.lon",
+                "value" : -122
+              }
+            }
+          ]
+        }
+      },
+      {
+        "split" : {
+          "if" : "ctx.url.path.contains('mockupServer') && ctx.url.path.contains('view') ",
+          "field" : "url.path",
+          "separator" : "\\/",
+          "target_field" : "test",
+          "ignore_missing" : true,
+          "ignore_failure" : true
+        }
+      },
+      {
+        "split" : {
+          "if" : "ctx.url.path.contains('mockupServer') && ctx.url.path.contains('view') ",
+          "field" : "test.9",
+          "separator" : "-",
+          "target_field" : "product_detail_temp",
+          "ignore_failure" : true
+        }
+      },
+      {
+        "set" : {
+          "if" : "ctx.url.path.contains('mockupServer') && ctx.url.path.contains('view') ",
+          "field" : "product.entityCode",
+          "value" : "{{product_detail_temp.0}}",
+          "ignore_failure" : true
+        }
+      },
+      {
+        "set" : {
+          "if" : "ctx.url.path.contains('mockupServer') && ctx.url.path.contains('view') ",
+          "field" : "product.designCode",
+          "value" : "{{product_detail_temp.1}}",
+          "ignore_failure" : true
+        }
+      },
+      {
+        "set" : {
+          "if" : "ctx.url.path.contains('mockupServer') && ctx.url.path.contains('view') ",
+          "field" : "product.designLineCode",
+          "value" : "{{product_detail_temp.2}}",
+          "ignore_failure" : true
+        }
+      },
+      {
+        "set" : {
+          "if" : "ctx.url.path.contains('mockupServer') && ctx.url.path.contains('view') ",
+          "field" : "product.productCode",
+          "value" : "{{product_detail_temp.3}}",
+          "ignore_failure" : true
+        }
+      },
+      {
+        "set" : {
+          "if" : "ctx.url.path.contains('mockupServer') && ctx.url.path.contains('view') ",
+          "field" : "product.color",
+          "value" : "{{product_detail_temp.4}}",
+          "ignore_failure" : true
+        }
+      },
+      {
+        "set" : {
+          "if" : "ctx.url.path.contains('mockupServer') && ctx.url.path.contains('view') ",
+          "field" : "mockup_url",
+          "value" : "{{url.path}}"
+        }
+      },
+      {
+        "gsub" : {
+          "if" : "ctx.containsKey('mockup_url')",
+          "field" : "mockup_url",
+          "pattern" : "/internal/mockupServer/view/",
+          "replacement" : "https://cdn.32pt.com/"
+        }
+      },
+      {
+        "remove" : {
+          "field" : [
+            "test",
+            "product_detail_temp",
+            "message"
+          ],
+          "ignore_failure" : true
+        }
+      },
+      {
+        "set" : {
+          "field" : "pipeline",
+          "value" : "filebeat-pipeline-custom"
+        }
+      }
+    ],
+    "on_failure" : [
+      {
+        "set" : {
+          "field" : "error.message",
+          "value" : "{{ _ingest.on_failure_message }}"
+        }
+      }
+    ]
+  }
+}

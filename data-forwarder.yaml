@@ -1,0 +1,93 @@
+#PUT _ingest/pipeline/data-forwarder
+{
+  "data-forwarder" : {
+    "description" : "",
+    "processors" : [
+      {
+        "gsub" : {
+          "field" : "message",
+          "pattern" : "\n",
+          "replacement" : "",
+          "ignore_failure" : true,
+          "ignore_missing" : true
+        }
+      },
+      {
+        "grok" : {
+          "field" : "message",
+          "patterns" : [
+            """\[%{TIMESTAMP_ISO8601:timestamp}\] \[%{LOGLEVEL:level}\] - (?<json_data>(.|\r|\n)*)"""
+          ],
+          "ignore_failure" : true,
+          "ignore_missing" : true
+        }
+      },
+      {
+        "json" : {
+          "if" : "ctx.containsKey('message')",
+          "field" : "json_data",
+          "target_field" : "data",
+          "ignore_failure" : true
+        }
+      },
+      {
+        "json" : {
+          "field" : "data.message",
+          "ignore_failure" : true
+        }
+      },
+      {
+        "kv" : {
+          "if" : "!ctx.containsKey('data')",
+          "field" : "json_data",
+          "field_split" : ",",
+          "value_split" : "\\:",
+          "target_field" : "data",
+          "strip_brackets" : true,
+          "trim_key" : """ (\\ |\\{|\\'|\\") """,
+          "trim_value" : """ (\\ |\\}|\\'|\\") """,
+          "ignore_failure" : true
+        }
+      },
+      {
+        "convert" : {
+          "field" : "data.statusCode",
+          "type" : "integer",
+          "ignore_failure" : true,
+          "ignore_missing" : true
+        }
+      },
+      {
+        "convert" : {
+          "field" : "data.level",
+          "type" : "string",
+          "ignore_failure" : true,
+          "ignore_missing" : true
+        }
+      },
+      {
+        "date" : {
+          "field" : "timestamp",
+          "formats" : [
+            "yyyy-MM-dd HH:mm:ss.SSS"
+          ],
+          "timezone" : "America/Los_Angeles",
+          "target_field" : "@timestamp",
+          "ignore_failure" : true
+        }
+      },
+      {
+        "date_index_name" : {
+          "field" : "@timestamp",
+          "index_name_prefix" : "oo-billing-",
+          "date_rounding" : "M",
+          "date_formats" : [
+            "yyyy-MM-dd'T'HH:mm:ss.SSSXXX"
+          ],
+          "timezone" : "America/Los_Angeles",
+          "ignore_failure" : true
+        }
+      }
+    ]
+  }
+}
